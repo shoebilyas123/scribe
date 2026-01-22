@@ -1,18 +1,23 @@
 
 #include <errno.h>
 #include <ctype.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/termios.h>
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 
 // Macros
-#define CTRL_KEY(k)((k) & 0x1f)
+#define CTRL_KEY(k) ((k) & 0x1f)
+#define KILO_VERSION "0.0.1"
 
 /** Data Structures */
 struct editorconf {
+  int cx;
+  int cy;
   struct termios orig_term;
   unsigned short scrnrows;
   unsigned short scrncols;
@@ -20,23 +25,75 @@ struct editorconf {
 
 struct editorconf E;
 
+/** Append Buffer */
+struct abuf {
+  char *b;
+  int len;
+};
+
+#define ABUF_INIT {NULL, 0}
+
+void abAppend(struct abuf *ab, const char *s, int len) {
+  char *newAB = realloc(ab->b, ab->len + len);
+
+  if (newAB == NULL)
+    return;
+  memcpy(&newAB[ab->len], s, len);
+  ab->b = newAB;
+  ab->len += len;
+}
+
+void abFree(struct abuf *ab) {
+  free(ab->b);
+}
 
 /** Terminal Manipulation */
-void drawrows() {
+void drawrows(struct abuf *ab) {
   int y = 0;
-  for (y = 0; y < E.scrncols; y++) {
-      write(STDOUT_FILENO, "~\r\n", 3);
+  for (y = 0; y < E.scrnrows; y++) {
+      if (y == E.scrnrows / 3) {
+          char welcome[80];
+          int welcomelen = snprintf(welcome, sizeof(welcome),
+            "Scribe editor -- version %s", KILO_VERSION);
+          if (welcomelen > E.scrncols)
+            welcomelen = E.scrncols;
+          int padding = (E.scrncols + welcomelen) / 3;
+          if (padding) {
+            abAppend(ab, "~", 1);
+            padding--;
+          }
+
+          while (padding--) {
+            abAppend(ab, " ", 1);
+          };
+
+          abAppend(ab, welcome, welcomelen);
+        } else {
+          abAppend(ab, "~", 1);
+        };
+
+    // This commands the terminal to clear one line at a time
+    abAppend(ab, "\x1b[K", 3);
+    if (y < E.scrnrows - 1) {
+        abAppend(ab, "\r\n", 2);
+    }
   }
 }
 
-void repcrsr() {
-  write(STDOUT_FILENO, "\x1b[H",3);
+void repcrsr(struct abuf *ab) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+  abAppend(ab, buf, strlen(buf));
 }
 
 void clearscrn() {
-  write(STDOUT_FILENO, "\x1b[2J", 4);
-  drawrows();
-  repcrsr();
+  struct abuf ab = ABUF_INIT;
+
+  drawrows(&ab);
+  repcrsr(&ab);
+
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
 }
 void die(const char *s) {
   clearscrn();
@@ -84,6 +141,22 @@ char editor_read_key() {
   return c;
 }
 
+void editor_mv_crsr(char key) {
+  switch (key) {
+  case 'a':
+    E.cx--;
+    break;
+  case 'd':
+    E.cx++;
+    break;
+    case 'w':
+      E.cy--;
+      break;
+      case 's':
+        E.cy++;
+        break;
+  }
+}
 int getCursorPos(unsigned short *rows, unsigned short *cols) {
   if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) {
     return -1;
@@ -103,7 +176,7 @@ int getCursorPos(unsigned short *rows, unsigned short *cols) {
   if (buf[0] != '\x1b' || buf[1] != '[')
     return -1;
 
-  if (sscanf(&buf[2], "%d;%d", rows, cols) != 1) return -1;
+  if (sscanf(&buf[2], "%hu;%hu", rows, cols) != 2) return -1;
   return 0;
 }
 
@@ -128,8 +201,14 @@ void process_key_press() {
   switch (c) {
   case CTRL_KEY('q'):
     clearscrn();
-      exit(0);
-      break;
+    exit(0);
+        break;
+    case 'a':
+    case 'd':
+    case 'w':
+    case 's':
+    editor_mv_crsr(c);
+    break;
     default:
       printf("%c",c);
     }
@@ -144,8 +223,9 @@ void setup_editor() {
 int main() {
     setup_editor();
     enable_raw_mode();
+
     while (1) {
-      clearscrn();
+        clearscrn();
       process_key_press();
     }
     return 0;
